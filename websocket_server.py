@@ -25,35 +25,12 @@ client = OpenAI(api_key=api_key)
 # Store conversation history for each connection
 conversation_histories = {}
 
-# NPC voice mapping
-VOICE_MAPPING = {
-    "HR": "alloy",
-    "CEO": "echo",
-    "default": "alloy"
-}
-
-# NPC personality prompts
-NPC_PROMPTS = {
-    "HR": """You are Sarah Chen, HR Director at Venture Builder AI. Core traits:
-        - Warm but professional demeanor
-        - Excellent emotional intelligence
-        - Strong ethical boundaries
-        Keep responses concise (2-3 sentences) and natural.""",
-
-    "CEO": """You are Michael Chen, CEO of Venture Builder AI. Core traits:
-        - Visionary yet approachable
-        - Strategic thinker
-        - Passionate about venture building
-        Keep responses concise (2-3 sentences) and natural."""
-}
-
 async def process_audio(websocket):
     logger.info("Client connected")
     audio_buffer = []
     sample_rate = 16000
     connection_id = id(websocket)
     conversation_histories[connection_id] = []
-    current_npc = None
 
     try:
         while True:
@@ -66,11 +43,6 @@ async def process_audio(websocket):
                     audio_chunk = np.frombuffer(bytes.fromhex(data["chunk"]), dtype=np.float32)
                     logger.debug(f"Audio chunk size: {len(audio_chunk)}")
                     audio_buffer.append(audio_chunk)
-
-                    # Update current NPC if provided
-                    if "npc_role" in data:
-                        current_npc = data["npc_role"]
-                        logger.info(f"Updated current NPC to: {current_npc}")
 
                 elif data.get("type") == "end_of_audio":
                     logger.info("Processing complete audio")
@@ -90,38 +62,27 @@ async def process_audio(websocket):
                             user_input = transcript.text
                             logger.info(f"Transcribed text: {user_input}")
 
-                            # Get NPC-specific prompt
-                            system_prompt = NPC_PROMPTS.get(current_npc, NPC_PROMPTS["HR"])
-
-                            # Prepare messages for chat
-                            messages = [
-                                {"role": "system", "content": system_prompt},
-                                *conversation_histories[connection_id],
-                                {"role": "user", "content": user_input}
-                            ]
+                            # Add to conversation history
+                            conversation_histories[connection_id].append({
+                                "role": "user",
+                                "content": user_input
+                            })
 
                             # Get AI response
                             response = client.chat.completions.create(
                                 model="gpt-4-0125-preview",
-                                messages=messages,
+                                messages=conversation_histories[connection_id],
                                 temperature=0.85,
                                 max_tokens=150
                             )
                             ai_response = response.choices[0].message.content
                             logger.info(f"AI response: {ai_response}")
 
-                            # Update conversation history
-                            conversation_histories[connection_id].extend([
-                                {"role": "user", "content": user_input},
-                                {"role": "assistant", "content": ai_response}
-                            ])
-
-                            # Keep conversation history manageable
-                            if len(conversation_histories[connection_id]) > 10:
-                                conversation_histories[connection_id] = conversation_histories[connection_id][-10:]
-
-                            # Select voice based on NPC role
-                            voice = VOICE_MAPPING.get(current_npc, VOICE_MAPPING["default"])
+                            # Add AI response to history
+                            conversation_histories[connection_id].append({
+                                "role": "assistant",
+                                "content": ai_response
+                            })
 
                             # Convert to speech
                             tts_response = requests.post(
@@ -133,7 +94,7 @@ async def process_audio(websocket):
                                 json={
                                     "model": "tts-1",
                                     "input": ai_response,
-                                    "voice": voice
+                                    "voice": "alloy"
                                 }
                             )
 
@@ -141,14 +102,13 @@ async def process_audio(websocket):
                                 audio_data = tts_response.content
                                 logger.info("TTS conversion successful")
 
-                                # Send response with both text and audio
+                                # Send response
                                 response_message = json.dumps({
                                     "type": "audio_response",
-                                    "text": ai_response,
                                     "audio": audio_data.hex()
                                 })
                                 await websocket.send(response_message)
-                                logger.info("Response sent to client")
+                                logger.info("Audio response sent to client")
 
                             # Cleanup
                             if os.path.exists(temp_file):
@@ -157,17 +117,6 @@ async def process_audio(websocket):
 
                         except Exception as e:
                             logger.error(f"Error processing audio: {e}", exc_info=True)
-                            await websocket.send(json.dumps({
-                                "type": "error",
-                                "message": str(e)
-                            }))
-
-                elif data.get("type") == "interrupt":
-                    logger.info("Received interrupt request")
-                    audio_buffer = []
-                    await websocket.send(json.dumps({
-                        "type": "interrupted"
-                    }))
 
             except json.JSONDecodeError as e:
                 logger.error(f"JSON decode error: {e}")
